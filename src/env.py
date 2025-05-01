@@ -20,12 +20,12 @@ class GameEnv:
             self.config = yaml.safe_load(f)
 
         self.env = gym.make(env_name, obs_type="grayscale")
-        self.acs = self.env.action_space.shape[0]
+        self.acs = self.env.action_space.n
         self.obs = self.env.observation_space.shape[0]
         self.env_name = env_name
         
-        self.model = DuelDQN(input_dim=self.config.get("frame_stack", 4), output_dim=self.acs)
-        self.target_model = DuelDQN(input_dim=self.config.get("frame_stack", 4), output_dim=self.acs)
+        self.model = DuelDQN(in_channels=self.config.get("frame_stack", 4), output_dim=self.acs)
+        self.target_model = DuelDQN(in_channels=self.config.get("frame_stack", 4), output_dim=self.acs)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.opt = Adam(self.model.parameters(), lr=self.config["lr"])
