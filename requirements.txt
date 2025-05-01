@@ -1,0 +1,6 @@
+torch
+numpy
+opencv-python
+gymnasium
+ale-py
+tqdm
