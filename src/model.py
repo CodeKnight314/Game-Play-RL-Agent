@@ -5,11 +5,11 @@ class DuelDQN(nn.Module):
     def __init__(self, in_channels: int, output_dim: int):
         super().__init__()
         self.feature = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),  # (32, 20, 20)
+            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),            # (64, 9, 9)
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),            # (64, 7, 7)
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((7, 7)),
             nn.Flatten()
