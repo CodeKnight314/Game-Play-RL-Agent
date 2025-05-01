@@ -18,3 +18,5 @@ if __name__ == "__main__":
     parser.add_argument("--train", action="store_true", help="flag to toggle training")
     
     args = parser.parse_args()
+    
+    main(args)
