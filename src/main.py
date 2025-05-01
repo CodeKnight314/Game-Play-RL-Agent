@@ -1,8 +1,17 @@
 import argparse
 from src.env import GameEnv
 
+MODEL_ENV_MAP = {
+    "breakout": "ALE/Breakout-v5",
+    "pong":"ALE/Pong-v5"
+}
+
 def main(args):
-    env = GameEnv(args.c, args.env, args.w)
+    env_name = MODEL_ENV_MAP.get(args.model)
+    if env_name is None:
+        raise ValueError(f"Invalid model type '{args.model}'. Choose from: {', '.join(MODEL_ENV_MAP.keys())}")
+    
+    env = GameEnv(args.c, env_name, args.w)
     if args.train:
         env.train(args.o)
         env.test(args.o)
