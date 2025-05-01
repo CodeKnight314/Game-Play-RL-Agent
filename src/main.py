@@ -7,11 +7,11 @@ MODEL_ENV_MAP = {
 }
 
 def main(args):
-    env_name = MODEL_ENV_MAP.get(args.model)
+    env_name = MODEL_ENV_MAP.get(args.env)
     if env_name is None:
-        raise ValueError(f"Invalid model type '{args.model}'. Choose from: {', '.join(MODEL_ENV_MAP.keys())}")
+        raise ValueError(f"Invalid model type '{args.env}'. Choose from: {', '.join(MODEL_ENV_MAP.keys())}")
     
-    env = GameEnv(args.c, env_name, args.w)
+    env = GameEnv(args.c, env_name, args.w, args.num_envs)
     if args.train:
         env.train(args.o)
         env.test(args.o)
@@ -24,6 +24,7 @@ if __name__ == "__main__":
     parser.add_argument("--c", type=str, required=True, help="config file path")
     parser.add_argument("--w", type=str, help="path to model weights")
     parser.add_argument("--o", type=str, required=True, help="output path to save weights and simulations")
+    parser.add_argument("--num_envs", type=int, default=8, help="Number of environments to run for parallel")
     parser.add_argument("--train", action="store_true", help="flag to toggle training")
     
     args = parser.parse_args()
