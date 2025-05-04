@@ -16,7 +16,7 @@ from gymnasium.wrappers import FrameStackObservation
 gym.register_envs(ale_py)
 
 class GameEnv:
-    def __init__(self, config: str, env_name: str, weight_path: str, num_envs: int):
+    def __init__(self, config: str, env_name: str, weight_path: str, num_envs: int, resume_step: int):
         with open(config, 'r') as f: 
             self.config = yaml.safe_load(f)
 
@@ -62,6 +62,8 @@ class GameEnv:
         
         self.update_target(hard_update=True)
         
+        self.start_step = resume_step
+        
     def update_target(self, hard_update: bool=True, tau: float = 0.005):
         if hard_update: 
             self.target_model.load_state_dict(self.model.state_dict())
@@ -78,9 +80,9 @@ class GameEnv:
                 
     def train(self, path: str):
         os.makedirs(path, exist_ok=True)
-        pbar = tqdm(total=self.config["max_frames"], desc="Frames: ")
+        pbar = tqdm(initial=self.start_step, total=self.config["max_frames"], desc="Frames: ")
         episode_rewards = [0.0] * self.num_envs
-        step = 0
+        step = self.start_step
         max_reward = -1e6
         
         avg_reward = deque(maxlen=self.config["window_ma"])
@@ -102,7 +104,6 @@ class GameEnv:
             
             next_obs, rewards, terminateds, truncateds, infos = self.env.step(actions)
             dones = np.logical_or(terminateds, truncateds)
-
 
             resized_obs = np.array([
                 [cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA) for frame in env_obs]
