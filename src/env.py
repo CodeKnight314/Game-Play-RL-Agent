@@ -11,6 +11,7 @@ from tqdm import tqdm
 import random
 import numpy as np
 from collections import deque
+from gymnasium.wrappers import FrameStackObservation
 
 gym.register_envs(ale_py)
 
@@ -20,7 +21,8 @@ class GameEnv:
             self.config = yaml.safe_load(f)
 
         self.env = gym.vector.AsyncVectorEnv(
-            [lambda: gym.make(env_name, obs_type="grayscale") for i in range(num_envs)], 
+            [lambda: FrameStackObservation(gym.make(env_name, obs_type="grayscale"), stack_size=self.config.get("frame_stack", 4)) 
+             for i in range(num_envs)], 
             autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
         )
         
@@ -68,7 +70,7 @@ class GameEnv:
                 target_param.data.copy_(tau * model_param.data + (1 - tau) * target_param.data)
 
     def update_noise(self, step: int):
-        self.td3_exploration = max(self.epsilon_min, self.config["epsilon"] - (step / 1000000) * (self.config["epsilon"] - self.epsilon_min))
+        self.epsilon = max(self.epsilon_min, self.config["epsilon"] - (step / 1000000) * (self.config["epsilon"] - self.epsilon_min))
                 
     def preprocess(self, frame):
         resized = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA) / 255.0
@@ -77,113 +79,84 @@ class GameEnv:
     def train(self, path: str):
         os.makedirs(path, exist_ok=True)
         pbar = tqdm(total=self.config["max_frames"], desc="Frames: ")
-
-        avg_reward = deque(maxlen=self.config["window_ma"])
-        avg_loss = deque(maxlen=self.config["window_ma"])
-        
-        # Initialize frame stacks for each environment
-        obs, _ = self.env.reset()
-        for i in range(self.num_envs):
-            frame = self.preprocess(obs[i])
-            self.frame_stacks[i] = deque(maxlen=self.num_stack)
-            for _ in range(self.num_stack):
-                self.frame_stacks[i].append(frame)
-
         episode_rewards = [0.0] * self.num_envs
         step = 0
         max_reward = -1e6
         
-        while step < int(self.config["max_frames"]):
-            # Update epsilon with linear decay
-            self.epsilon = max(self.epsilon_min, self.config["epsilon"] - (step / self.config["max_frames"]) * 
-                            (self.config["epsilon"] - self.epsilon_min))
+        avg_reward = deque(maxlen=self.config["window_ma"])
+        avg_loss = deque(maxlen=self.config["window_ma"])
+        
+        while step < self.config["max_frames"]:
+            obs, _ = self.env.reset()
             
-            # Select actions (vectorized)
-            if np.random.random() < self.epsilon:
-                actions = np.array([self.env.single_action_space.sample() for _ in range(self.num_envs)])
-            else:
-                state_tensors = torch.as_tensor(np.array([np.stack(fs, axis=0) for fs in self.frame_stacks]), 
-                                            dtype=torch.float32).to(self.device)
-                q_values = self.model(state_tensors)
-                actions = torch.argmax(q_values, dim=1).cpu().numpy()
-            
-            # Execute actions in all environments
+            if random.random() < self.epsilon:
+                actions = self.env.action_space.sample()
+            else: 
+                with torch.no_grad():
+                    state_tensor = torch.FloatTensor(obs).to(self.device)
+                    q_values = self.model(state_tensor)
+                    actions = torch.argmax(q_values, dim=1).cpu().numpy()
             next_obs, rewards, terminateds, truncateds, infos = self.env.step(actions)
+            dones = np.logical_or(terminateds, truncateds)
             
-            # Process each environment
             for i in range(self.num_envs):
-                # Current state (before step)
-                curr_state = np.stack(self.frame_stacks[i], axis=0)
-                
-                # Process new observation
-                frame = self.preprocess(next_obs[i])
-                self.frame_stacks[i].append(frame)
-                
-                # Next state (after adding new frame)
-                next_state = np.stack(self.frame_stacks[i], axis=0)
-                
-                # Store transition in replay buffer
-                self.buffer.push(
-                    curr_state, 
-                    actions[i],
-                    rewards[i],
-                    next_state, 
-                    terminateds[i] or truncateds[i]
-                )
-                
-                # Update episode rewards
+                self.buffer.add(obs[i], actions[i], rewards[i], next_obs[i], dones[i])
                 episode_rewards[i] += rewards[i]
                 
-                # Check if episode is done
-                if terminateds[i] or truncateds[i]:
+                if dones[i]:
                     avg_reward.append(episode_rewards[i])
                     episode_rewards[i] = 0.0
-            
-            # Update step counter and progress bar
-            step += self.num_envs
-            pbar.update(self.num_envs)
-            
-            # Training step
-            if len(self.buffer) > 10000:
+                
+            obs = next_obs
+        
+            if len(self.buffer) > self.batch_size and step % self.config.get("train_freq", 4) == 0:
                 states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
                 
-                # Double DQN update
+                current_q_values = self.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+                
                 with torch.no_grad():
-                    next_actions = self.model(next_states).argmax(dim=1, keepdim=True)
-                    target_q_values = self.target_model(next_states).gather(1, next_actions)
-                    targets = rewards + self.config["gamma"] * target_q_values * (1 - dones)
+                    next_actions = self.model(next_states).argmax(1, keepdim=True)
+                    max_next_q = self.target(next_states).gather(1, next_actions)
+                    target_q_values = rewards + (1 - dones) * self.config["gamma"] * max_next_q
+                    
+                current_q_values = self.model(states).gather(1, actions)
+                loss = torch.nn.functional.smooth_l1_loss(current_q_values, target_q_values)
+                avg_loss.append(loss.item())
                 
-                # Current Q-values
-                q_values = self.model(states).gather(1, actions)
-                
-                # Compute loss and update
-                loss = torch.nn.functional.mse_loss(q_values, targets)
                 self.opt.zero_grad()
                 loss.backward()
                 self.opt.step()
-                
-                # Record loss
-                avg_loss.append(loss.item())
-                
-                # Update target network periodically
-                if step % self.update_freq == 0:
-                    self.update_target(hard_update=True)  # Using hard update as in original paper
             
-            # Update progress bar
-            mva_reward = sum(avg_reward) / len(avg_reward) if avg_reward else 0.0
-            mva_loss = sum(avg_loss) / len(avg_loss) if avg_loss else 0.0
+            if step % self.config["update_freq"] == 0:
+                tau = self.config.get("tau", 0.005)
+                self.update_target(hard_update=False, tau=tau)
             
-            pbar.set_postfix({
-                "reward": round(mva_reward, 2),
-                "loss": round(mva_loss, 5),
-                "epsilon": round(self.epsilon, 3)
-            })
+            self.update_noise(step)
             
-            # Save model on improvement
-            if max_reward * 1.10 <= mva_reward:
-                self.model.save_weights(os.path.join(path, "ddqn.pth"))
-                max_reward = mva_reward
-
+            pbar.update(self.num_envs)
+            step += self.num_envs
+            
+            if avg_reward:
+                avg_reward_val = sum(avg_reward) / len(avg_reward)
+            else:
+                avg_reward_val = 0.0
+            if avg_loss:
+                avg_loss_val = sum(avg_loss) / len(avg_loss)
+            else:
+                avg_loss_val = 0.0
+            
+            pbar.set_postfix(
+                reward=f"{avg_reward_val:.3f}",
+                loss=f"{avg_loss_val:.3f}",
+                epsilon=f"{self.epsilon:.3f}"
+            )
+            
+            if avg_reward_val > max_reward:
+                max_reward = avg_reward_val
+                self.model.save_weights(os.path.join(path, "model.pth"))
+        
+        self.model.save_weights(os.path.join(path, "final.pth"))
+        
     def test(self, path: str):
         self.env = gym.make(self.env_name, obs_type="grayscale", render_mode="rgb_array")
         self.model.eval()
