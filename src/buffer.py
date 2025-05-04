@@ -77,7 +77,6 @@ class ReplayBufferFast:
         dones = torch.tensor(self.dones[indices], dtype=torch.float32).unsqueeze(-1).to(self.device)
         
         return states, actions, rewards, next_states, dones
-    
 
 def benchmark(buffer_class, state_dim=(4, 84, 84), batch_size=256, memory_size=100000, samples=1000):
     buffer = buffer_class(state_dim) if buffer_class == ReplayBufferFast else buffer_class(memory_size)
