@@ -49,10 +49,10 @@ class ReplayBufferFast:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.states = np.zeros((max_size, *state_shape), dtype=np.float32)
-        self.actions = np.zeros((max_size, ), dtype=np.long)
+        self.actions = np.zeros((max_size, ), dtype=np.longlong)
         self.rewards = np.zeros((max_size, ), dtype=np.float32)
         self.next_states = np.zeros((max_size, *state_shape), dtype=np.float32)
-        self.dones = np.zeros((max_size, ), dtype=np.bool)
+        self.dones = np.zeros((max_size, ), dtype=np.bool_)
         
     def __len__(self):
         return self.size

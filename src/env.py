@@ -1,5 +1,5 @@
 from src.model import DuelDQN
-from src.buffer import ReplayBuffer
+from src.buffer import ReplayBufferFast
 import gymnasium as gym
 import ale_py
 import cv2
@@ -44,7 +44,7 @@ class GameEnv:
             centered=True
         )
         
-        self.buffer = ReplayBuffer(memory=self.config["memory"])
+        self.buffer = ReplayBufferFast()
         
         self.num_stack = self.config.get("frame_stack", 4)
         self.frame_stacks = [deque(maxlen=self.num_stack) for _ in range(num_envs)]
@@ -86,21 +86,36 @@ class GameEnv:
         avg_reward = deque(maxlen=self.config["window_ma"])
         avg_loss = deque(maxlen=self.config["window_ma"])
         
+        obs, _ = self.env.reset()
         while step < self.config["max_frames"]:
-            obs, _ = self.env.reset()
-            
             if random.random() < self.epsilon:
                 actions = self.env.action_space.sample()
             else: 
                 with torch.no_grad():
-                    state_tensor = torch.FloatTensor(obs).to(self.device)
+                    resized_obs = np.array([
+                        [cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA) for frame in env_obs]
+                        for env_obs in obs
+                    ])
+                    state_tensor = torch.FloatTensor(resized_obs).to(self.device)
                     q_values = self.model(state_tensor)
                     actions = torch.argmax(q_values, dim=1).cpu().numpy()
+            
             next_obs, rewards, terminateds, truncateds, infos = self.env.step(actions)
             dones = np.logical_or(terminateds, truncateds)
+
+
+            resized_obs = np.array([
+                [cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA) for frame in env_obs]
+                for env_obs in obs
+            ])
+
+            resized_next_obs = np.array([
+                [cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA) for frame in env_obs]
+                for env_obs in next_obs
+            ])
             
             for i in range(self.num_envs):
-                self.buffer.add(obs[i], actions[i], rewards[i], next_obs[i], dones[i])
+                self.buffer.push(resized_obs[i], actions[i], rewards[i], resized_next_obs[i], dones[i])
                 episode_rewards[i] += rewards[i]
                 
                 if dones[i]:
@@ -111,12 +126,11 @@ class GameEnv:
         
             if len(self.buffer) > self.batch_size and step % self.config.get("train_freq", 4) == 0:
                 states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
-                
-                current_q_values = self.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+                current_q_values = self.model(states).gather(1, actions)
                 
                 with torch.no_grad():
                     next_actions = self.model(next_states).argmax(1, keepdim=True)
-                    max_next_q = self.target(next_states).gather(1, next_actions)
+                    max_next_q = self.target_model(next_states).gather(1, next_actions)
                     target_q_values = rewards + (1 - dones) * self.config["gamma"] * max_next_q
                     
                 current_q_values = self.model(states).gather(1, actions)
