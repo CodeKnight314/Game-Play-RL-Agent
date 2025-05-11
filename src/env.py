@@ -9,7 +9,6 @@ from torch.optim import Adam
 import torch.nn.functional as F
 import os
 from tqdm import tqdm
-import random
 import numpy as np
 from collections import deque
 from gymnasium.wrappers import FrameStackObservation
@@ -27,8 +26,9 @@ class GameEnv:
             autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
         )
         
-        self.num_actions = self.env.action_space.n
-        self.obs_shape = (self.config.get("frame_stack", 4, 84, 84))
+        self.num_actions = self.env.action_space[0].n
+        
+        self.obs_shape = (self.config.get("frame_stack", 4), 84, 84)
         self.env_name = env_name 
         self.num_envs = num_envs
         
@@ -80,6 +80,8 @@ class GameEnv:
         obs, _ = self.env.reset()
         
         states = self.preprocess_obs(obs)
+
+        total_rewards = np.zeros((self.num_envs))
         
         for step in range(self.rollout_length):
             with torch.no_grad():
@@ -105,6 +107,11 @@ class GameEnv:
             obs = next_obs
             states = next_states
             
+            if step == 0:
+                total_rewards = rewards
+            else: 
+                total_rewards = np.concatenate([total_rewards, rewards]).reshape(-1)
+            
         with torch.no_grad(): 
             _, _, last_value = self.model.get_action(states)
             
@@ -115,6 +122,8 @@ class GameEnv:
         )
         
         self.buffer.to(self.device)
+        
+        return np.sum(total_rewards)
         
     def update_policy(self):
         total_loss = 0.0
@@ -157,11 +166,9 @@ class GameEnv:
         return avg_loss, avg_policy_loss, avg_value_loss, avg_entropy_loss
     
     def train(self, path: str):
-        """Train the agent using PPO"""
         os.makedirs(path, exist_ok=True)
         
         pbar = tqdm(initial=self.start_step, total=self.config["max_frames"], desc="Frames: ")
-        episode_count = 0
         step = self.start_step
         max_reward = -1e6
         
@@ -169,7 +176,8 @@ class GameEnv:
         avg_loss = deque(maxlen=self.config["window_ma"])
         
         while step < self.config["max_frames"]:
-            self.collect_rollouts()
+            total_rewards = self.collect_rollouts()
+            avg_reward.append(total_rewards)
             
             frames_in_rollout = self.rollout_length * self.num_envs
             pbar.update(frames_in_rollout)
@@ -177,31 +185,6 @@ class GameEnv:
             
             loss, policy_loss, value_loss, entropy_loss = self.update_policy()
             avg_loss.append(loss)
-            
-            with torch.no_grad():
-                eval_obs, _ = self.env.reset()
-                eval_states = self.preprocess_obs(eval_obs)
-                eval_episode_rewards = [0.0] * self.num_envs
-                eval_dones = [False] * self.num_envs
-                eval_episodes = 0
-                
-                for _ in range(self.config.get("eval_steps", 1000)):
-                    actions, _, _ = self.model.get_action(eval_states)
-                    actions_np = actions.cpu().numpy()
-                    
-                    eval_next_obs, eval_rewards, eval_terminateds, eval_truncateds, _ = self.env.step(actions_np)
-                    eval_dones = np.logical_or(eval_terminateds, eval_truncateds)
-                    
-                    for i in range(self.num_envs):
-                        eval_episode_rewards[i] += eval_rewards[i]
-                        
-                        if eval_dones[i]:
-                            avg_reward.append(eval_episode_rewards[i])
-                            eval_episode_rewards[i] = 0.0
-                            eval_episodes += 1
-                    
-                    eval_obs = eval_next_obs
-                    eval_states = self.preprocess_obs(eval_obs)
             
             if avg_reward:
                 avg_reward_val = sum(avg_reward) / len(avg_reward)
@@ -219,13 +202,14 @@ class GameEnv:
                 policy_loss=f"{policy_loss:.3f}",
                 value_loss=f"{value_loss:.3f}",
                 entropy=f"{entropy_loss:.3f}",
-                episodes=f"{episode_count + eval_episodes}"
             )
-            
-            episode_count += eval_episodes
             
             if avg_reward_val > max_reward:
                 max_reward = avg_reward_val
                 torch.save(self.model.state_dict(), os.path.join(path, "model.pth"))
         
         torch.save(self.model.state_dict(), os.path.join(path, "final.pth"))
+        
+    def test(self, path: str):
+        os.makedirs(path, exist_ok=True)
+        pass
