@@ -51,21 +51,20 @@ class ActorCritc(nn.Module):
                 
     def forward(self, x: torch.Tensor):
         features = self.conv(x)
-        fc_output = self.fc(features)
         
-        action_probs = F.softmax(self.actor(fc_output), dim=-1)
-        value = self.critic(fc_output)
+        action_probs = F.softmax(self.actor(features), dim=-1)
+        value = self.critic(features).squeeze(-1)
         
         return action_probs, value
     
-    def get_action(self, obs, deterministic=False):
+    def get_action(self, obs, deterministic=True):
         action_probs, value = self(obs)
         dist = Categorical(action_probs)
         
         if deterministic:
             action = action_probs.argmax(dim=-1)
         else:
-            action = dist.sample()
+            action = dist.rsample()
             
         action_log_probs = dist.log_prob(action)
         
