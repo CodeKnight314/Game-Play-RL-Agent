@@ -13,8 +13,12 @@ def main(args):
     
     env = GameEnv(args.c, env_name, args.w, args.num_envs, args.resume_step)
     if args.train:
-        env.train(args.o)
-        env.test(args.o)
+        try:
+            env.train(args.o)
+            env.test(args.o)
+            env.plot_history(args.o)
+        except KeyboardInterrupt:
+            env.plot_history(args.o)
     else: 
         env.test(args.o)
     
