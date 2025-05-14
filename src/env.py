@@ -12,8 +12,41 @@ from tqdm import tqdm
 import numpy as np
 from collections import deque
 from gymnasium.wrappers import FrameStackObservation
+import matplotlib.pyplot as plt
 
 gym.register_envs(ale_py)
+
+# Borrowed from https://github.com/DarylRodrigo/rl_lib/blob/master/PPO/envs.py
+class EpisodicLifeEnv(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self.lives = 0
+        self.was_real_done  = True
+
+    def step(self, action):
+        next_obs, rewards, terminateds, truncateds, infos = self.env.step(action)
+        self.was_real_done = terminateds or truncateds
+        lives = self.env.unwrapped.ale.lives()
+        if lives < self.lives and lives > 0:
+            terminateds = True
+            truncated = True
+        self.lives = lives
+        return next_obs, rewards, True, truncateds, infos
+
+    def reset(self, **kwargs):
+        if self.was_real_done:
+            obs, info = self.env.reset(**kwargs)
+        else:
+            obs, _, _, _, info = self.env.step(0)
+        self.lives = self.env.unwrapped.ale.lives()
+        return obs, info
+
+class ClipRewardEnv(gym.RewardWrapper):
+    def __init__(self, env):
+        gym.RewardWrapper.__init__(self, env)
+
+    def reward(self, reward):
+        return np.sign(reward)
 
 class GameEnv:
     def __init__(self, config: str, env_name: str, weight_path: str, num_envs: int, resume_step: int = 0):
@@ -21,8 +54,7 @@ class GameEnv:
             self.config = yaml.safe_load(f)
             
         self.env = gym.vector.AsyncVectorEnv(
-            [lambda: FrameStackObservation(gym.make(env_name, obs_type="grayscale"), stack_size=self.config.get("frame_stack", 4))
-             for i in range(num_envs)], 
+            [lambda: self._make_env(env_name) for i in range(num_envs)], 
             autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
         )
         
@@ -55,7 +87,8 @@ class GameEnv:
         
         if weight_path: 
             self.model.load_state_dict(torch.load(weight_path))
-            
+            print(f"[INFO] Loaded model from {weight_path}")
+
         self.gamma = self.config.get("gamma", 0.99)
         self.gae_lambda = self.config.get("gae_lambda", 0.95)
         self.clip_range = self.config.get("clip_range", 0.2)
@@ -66,6 +99,13 @@ class GameEnv:
         self.batch_size = self.config.get("batch_size", 256)
         
         self.start_step = resume_step
+
+    def _make_env(self, env_name: str):
+        env = gym.make(env_name, obs_type="grayscale")
+        env = EpisodicLifeEnv(env)
+        env = ClipRewardEnv(env)
+        env = FrameStackObservation(env, stack_size=self.config.get("frame_stack", 4))
+        return env
         
     def preprocess_obs(self, obs: np.array):
         resized_obs = np.array([
@@ -80,10 +120,12 @@ class GameEnv:
     def collect_rollouts(self):
         self.buffer.reset()
         obs, _ = self.env.reset()
-        
         states = self.preprocess_obs(obs)
 
-        total_rewards = np.zeros((self.num_envs))
+        episode_rewards = [0.0] * self.num_envs
+        episode_lengths = [0] * self.num_envs
+        completed_episodes = 0
+        total_episode_rewards = 0.0
         
         for step in range(self.rollout_length):
             with torch.no_grad():
@@ -109,10 +151,15 @@ class GameEnv:
             obs = next_obs
             states = next_states
             
-            if step == 0:
-                total_rewards = rewards
-            else: 
-                total_rewards = np.concatenate([total_rewards, rewards]).reshape(-1)
+            for i in range(self.num_envs):
+                episode_rewards[i] += rewards[i]
+                episode_lengths[i] += 1
+                
+                if dones[i]:
+                    completed_episodes += 1
+                    total_episode_rewards += episode_rewards[i]
+                    episode_rewards[i] = 0.0
+                    episode_lengths[i] = 0
             
         with torch.no_grad(): 
             _, _, last_value = self.model.get_action(states)
@@ -125,7 +172,9 @@ class GameEnv:
         
         self.buffer.to(self.device)
         
-        return np.sum(total_rewards)
+        avg_episode_reward = total_episode_rewards / completed_episodes if completed_episodes > 0 else 0.0
+        avg_episode_length = sum(episode_lengths) / completed_episodes if completed_episodes > 0 else 0
+        return avg_episode_reward, completed_episodes, avg_episode_length
         
     def update_policy(self):
         total_loss = 0.0
@@ -172,14 +221,21 @@ class GameEnv:
         pbar = tqdm(initial=self.start_step, total=self.config["max_frames"], desc="Frames: ")
         step = self.start_step
         max_reward = -1e6
-        
+        total_episodes = 0
+
         avg_reward = deque(maxlen=self.config["window_ma"])
         avg_loss = deque(maxlen=self.config["window_ma"])
+        avg_episode_length = deque(maxlen=self.config["window_ma"])
+        self.reward_history = []
+        self.loss_history = []
         
         while step < self.config["max_frames"]:
-            total_rewards = self.collect_rollouts()
-            avg_reward.append(total_rewards)
-            
+            avg_episode_reward, completed_episodes, avg_episode_length_value = self.collect_rollouts()
+            if completed_episodes > 0:
+                avg_reward.append(avg_episode_reward)
+                avg_episode_length.append(avg_episode_length_value)
+                total_episodes += completed_episodes
+
             frames_in_rollout = self.rollout_length * self.num_envs
             pbar.update(frames_in_rollout)
             step += frames_in_rollout
@@ -196,21 +252,107 @@ class GameEnv:
                 avg_loss_val = sum(avg_loss) / len(avg_loss)
             else:
                 avg_loss_val = 0.0
-            
+
+            if avg_episode_length:
+                avg_episode_length_val = sum(avg_episode_length) / len(avg_episode_length)
+            else: 
+                avg_episode_length_val = 0.0
+
             pbar.set_postfix(
                 reward=f"{avg_reward_val:.3f}",
                 loss=f"{avg_loss_val:.3f}",
                 policy_loss=f"{policy_loss:.3f}",
                 value_loss=f"{value_loss:.3f}",
                 entropy=f"{entropy_loss:.3f}",
+                episodes=f"{total_episodes}",
+                length=f"{avg_episode_length_val:.3f}"
             )
+
+            self.reward_history.append(avg_reward_val)
+            self.loss_history.append(avg_loss_val)
             
             if avg_reward_val > max_reward:
                 max_reward = avg_reward_val
                 torch.save(self.model.state_dict(), os.path.join(path, "model.pth"))
         
         torch.save(self.model.state_dict(), os.path.join(path, "final.pth"))
+
+    def plot_history(self, path: str):
+        os.makedirs(path, exist_ok=True)
+        
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.reward_history, label="Reward")
+        plt.xlabel("frames")
+        plt.ylabel("reward")
+        plt.title("Reward History")
+        plt.legend()
+        plt.savefig(os.path.join(path, "reward_history.png"))
+        
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.loss_history, label="Loss")
+        plt.xlabel("frames")
+        plt.ylabel("loss")
+        plt.title("Loss History")
+        plt.legend()
+        plt.savefig(os.path.join(path, "loss_history.png"))
+        
+        plt.close()
         
     def test(self, path: str):
         os.makedirs(path, exist_ok=True)
-        pass
+        
+        test_env = gym.make(self.env_name, obs_type="grayscale", render_mode="rgb_array")
+        test_env = FrameStackObservation(test_env, stack_size=self.config.get("frame_stack", 4))
+        
+        frames = []
+        
+        obs, _ = test_env.reset()
+        state = torch.FloatTensor(self.preprocess_obs(obs)).unsqueeze(0).to(self.device)
+        done = False
+        
+        total_reward = 0
+        step = 0
+        
+        print("Starting game test...")
+        while not done:
+            with torch.no_grad():
+                action, _, _ = self.model.get_action(state, deterministic=True)
+            
+            action_np = action.cpu().numpy()[0]
+            next_obs, reward, terminated, truncated, _ = test_env.step(action_np)
+            
+            frame = test_env.render()
+            frames.append(frame)
+            
+            next_state = torch.FloatTensor(self.preprocess_obs(next_obs)).unsqueeze(0).to(self.device)
+            state = next_state
+            
+            total_reward += reward
+            done = terminated or truncated
+            step += 1
+        
+        print(f"Test completed. Total steps: {step}, Total reward: {total_reward}")
+        
+        try:
+            import cv2
+            
+            video_path = os.path.join(path, "gameplay.mp4")
+            height, width = frames[0].shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video = cv2.VideoWriter(video_path, fourcc, 30, (width, height))
+            
+            for frame in frames:
+                video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                
+            video.release()
+            print(f"Video saved to {video_path}")
+        except Exception as e:
+            print(f"Error saving video: {e}")
+            
+            frames_dir = os.path.join(path, "frames")
+            os.makedirs(frames_dir, exist_ok=True)
+            for i, frame in enumerate(frames):
+                plt.imsave(os.path.join(frames_dir, f"frame_{i:05d}.png"), frame)
+            print(f"Saved {len(frames)} frames to {frames_dir}")
+        
+        test_env.close()
