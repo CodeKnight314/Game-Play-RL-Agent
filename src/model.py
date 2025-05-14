@@ -52,17 +52,18 @@ class ActorCritc(nn.Module):
     def forward(self, x: torch.Tensor):
         features = self.conv(x)
         
-        action_probs = F.softmax(self.actor(features), dim=-1)
+        action_probs = self.actor(features)
         value = self.critic(features).squeeze(-1)
         
         return action_probs, value
     
     def get_action(self, obs, deterministic=False):
-        action_probs, value = self(obs)
-        dist = Categorical(action_probs)
+        action_logits, value = self(obs)
+        
+        dist = Categorical(logits=action_logits)
         
         if deterministic:
-            action = action_probs.argmax(dim=-1)
+            action = torch.argmax(action_logits, dim=-1)
         else:
             action = dist.sample()
             
@@ -71,8 +72,8 @@ class ActorCritc(nn.Module):
         return action, action_log_probs, value
     
     def evaluate_actions(self, obs, actions):
-        action_probs, value = self(obs)
-        dist = Categorical(action_probs)
+        action_logits, value = self(obs)
+        dist = Categorical(logits=action_logits)
         
         action_log_probs = dist.log_prob(actions)
         entropy = dist.entropy()
