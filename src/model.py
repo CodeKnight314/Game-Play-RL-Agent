@@ -57,14 +57,14 @@ class ActorCritc(nn.Module):
         
         return action_probs, value
     
-    def get_action(self, obs, deterministic=True):
+    def get_action(self, obs, deterministic=False):
         action_probs, value = self(obs)
         dist = Categorical(action_probs)
         
         if deterministic:
             action = action_probs.argmax(dim=-1)
         else:
-            action = dist.rsample()
+            action = dist.sample()
             
         action_log_probs = dist.log_prob(action)
         
