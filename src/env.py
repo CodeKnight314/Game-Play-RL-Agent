@@ -73,7 +73,9 @@ class GameEnv:
             for env_obs in obs
         ])
         
-        return torch.FloatTensor(resized_obs).to(self.device)
+        normalized_obs = resized_obs / 255.0
+    
+        return torch.FloatTensor(normalized_obs).to(self.device)
     
     def collect_rollouts(self):
         self.buffer.reset()
@@ -149,7 +151,6 @@ class GameEnv:
                 
                 self.opt.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 self.opt.step()
                 
                 total_loss += loss.item()
