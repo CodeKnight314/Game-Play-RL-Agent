@@ -1,17 +1,8 @@
 import argparse
 from src.env import GameEnv
 
-MODEL_ENV_MAP = {
-    "breakout": "ALE/Breakout-v5",
-    "pong":"ALE/Pong-v5"
-}
-
 def main(args):
-    env_name = MODEL_ENV_MAP.get(args.env)
-    if env_name is None:
-        raise ValueError(f"Invalid model type '{args.env}'. Choose from: {', '.join(MODEL_ENV_MAP.keys())}")
-    
-    env = GameEnv(args.c, env_name, args.w, args.num_envs, args.resume_step)
+    env = GameEnv(args.c, "ALE/Pong-v5", args.w, args.num_envs, args.resume_step)
     if args.train:
         try:
             env.train(args.o)
@@ -24,7 +15,6 @@ def main(args):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", type=str, default="breakout", choices=["breakout", "pong"], help="Environment for GameEnv")
     parser.add_argument("--c", type=str, required=True, help="config file path")
     parser.add_argument("--w", type=str, help="path to model weights")
     parser.add_argument("--o", type=str, required=True, help="output path to save weights and simulations")
