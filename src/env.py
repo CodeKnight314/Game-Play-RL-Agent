@@ -6,6 +6,7 @@ import cv2
 import yaml
 import torch
 from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.nn.functional as F
 import os
 from tqdm import tqdm
@@ -31,7 +32,7 @@ class EpisodicLifeEnv(gym.Wrapper):
             terminateds = True
             truncated = True
         self.lives = lives
-        return next_obs, rewards, True, truncateds, infos
+        return next_obs, rewards, terminateds, truncateds, infos
 
     def reset(self, **kwargs):
         if self.was_real_done:
@@ -77,6 +78,15 @@ class GameEnv:
             lr=self.config["lr"]
         )
         
+        # Initialize the cosine annealing scheduler
+        self.max_frames = self.config["max_frames"]
+        self.lr_min = self.config.get("min_lr", 0.00001)  # Minimum learning rate
+        self.scheduler = CosineAnnealingLR(
+            self.opt, 
+            T_max=self.max_frames // (self.num_envs * self.config.get("rollout_length", 128)),  # Convert frames to updates
+            eta_min=self.lr_min
+        )
+        
         self.rollout_length = self.config.get("rollout_length", 128)
         self.buffer = RolloutBuffer(
             rollout=self.rollout_length, 
@@ -93,7 +103,8 @@ class GameEnv:
         self.gae_lambda = self.config.get("gae_lambda", 0.95)
         self.clip_range = self.config.get("clip_range", 0.2)
         self.value_coef = self.config.get("value_coef", 0.5)
-        self.entropy_coef = self.config.get("entropy_coef", 0.01)
+        self.base_entropy_coef = self.config["entropy_coef"]
+        self.e_decay_end = self.config.get("e_decay_end", 1_000_000)
         self.max_grad_norm = self.config.get("max_grad_norm", 0.5)
         self.ppo_epochs = self.config.get("ppo_epochs", 4)
         self.batch_size = self.config.get("batch_size", 256)
@@ -175,6 +186,10 @@ class GameEnv:
         avg_episode_reward = total_episode_rewards / completed_episodes if completed_episodes > 0 else 0.0
         avg_episode_length = sum(episode_lengths) / completed_episodes if completed_episodes > 0 else 0
         return avg_episode_reward, completed_episodes, avg_episode_length
+
+    def update_entropy(self, frames: int):
+        frac = 1.0 - (frames / self.e_decay_end)
+        self.entropy_coef = self.base_entropy_coef * max(0.005, frac)
         
     def update_policy(self):
         total_loss = 0.0
@@ -200,6 +215,7 @@ class GameEnv:
                 
                 self.opt.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 self.opt.step()
                 
                 total_loss += loss.item()
@@ -239,8 +255,11 @@ class GameEnv:
             frames_in_rollout = self.rollout_length * self.num_envs
             pbar.update(frames_in_rollout)
             step += frames_in_rollout
+            self.update_entropy(step)
             
             loss, policy_loss, value_loss, entropy_loss = self.update_policy()
+            self.scheduler.step()
+            
             avg_loss.append(loss)
             
             if avg_reward:
@@ -263,7 +282,7 @@ class GameEnv:
                 loss=f"{avg_loss_val:.3f}",
                 policy_loss=f"{policy_loss:.3f}",
                 value_loss=f"{value_loss:.3f}",
-                entropy=f"{entropy_loss:.3f}",
+                entropy=f"{(-entropy_loss):.3f} x {(self.entropy_coef):.3f}",
                 episodes=f"{total_episodes}",
                 length=f"{avg_episode_length_val:.3f}"
             )
