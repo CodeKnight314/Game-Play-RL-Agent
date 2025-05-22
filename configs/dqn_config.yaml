@@ -1,0 +1,16 @@
+# DQN Configuration for Pong
+env_name: "ALE/Pong-v5"
+frame_stack: 4
+hidden_dim: 512
+lr: 0.00025
+max_frames: 10000000
+window_ma: 100
+
+# DQN specific parameters
+buffer_size: 100000
+batch_size: 32
+gamma: 0.99
+epsilon_start: 1.0
+epsilon_end: 0.1
+epsilon_decay: 1000000
+target_update: 10000 
