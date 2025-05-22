@@ -79,3 +79,40 @@ class ActorCritc(nn.Module):
         entropy = dist.entropy()
         
         return action_log_probs, value, entropy
+
+class DQN(torch.nn.Module):
+    def __init__(self, input_shape, hidden_dim, num_actions):
+        super().__init__()
+        
+        self.conv = torch.nn.Sequential(
+            torch.nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            torch.nn.ReLU(),
+            torch.nn.Flatten()
+        )
+        
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_shape)
+            conv_out = self.conv(dummy_input)
+            n_flatten = conv_out.shape[1]
+        
+        self.fc = torch.nn.Sequential(
+            torch.nn.Linear(n_flatten, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, num_actions)
+        )
+        
+    def forward(self, x):
+        x = self.conv(x)
+        return self.fc(x)
+    
+    def get_action(self, state, epsilon=0.0):
+        with torch.no_grad():
+            if torch.rand(1) < epsilon:
+                return torch.randint(0, self.fc[-1].out_features, (state.shape[0],))
+            
+            q_values = self(state)
+            return q_values.argmax(dim=1)
